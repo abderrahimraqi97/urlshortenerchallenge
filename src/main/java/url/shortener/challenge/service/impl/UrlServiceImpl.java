@@ -1,6 +1,8 @@
 package url.shortener.challenge.service.impl;
 
 import com.aventrix.jnanoid.jnanoid.NanoIdUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Async;
@@ -21,11 +23,12 @@ import java.util.Optional;
 @Service
 public class UrlServiceImpl implements UrlService {
 
+    private static final Logger log = LoggerFactory.getLogger(UrlServiceImpl.class);
+
     private final UrlRepository repo;
     private final AppProperties props;
     private final StringRedisTemplate redis;
     private final CodeGenerator codeGenerator;
-
 
     public UrlServiceImpl(UrlRepository repo, AppProperties props, StringRedisTemplate redis,
                           CodeGenerator codeGenerator) {
@@ -43,10 +46,13 @@ public class UrlServiceImpl implements UrlService {
      */
     @Override
     public ShortUrlResponseDto create(LongUrlRequestDto req) {
+        log.info("Creating short URL for longUrl={}", req.getLongUrl());
+
         // generate NanoID with configurable length
         String code = codeGenerator.generate(props.getCodeLength());
 
         if (repo.existsByShortUrl(code)) {
+            log.warn("Alias already exists for code={}", code);
             throw new AliasAlreadyExistsException(code);
         }
 
@@ -60,8 +66,9 @@ public class UrlServiceImpl implements UrlService {
 
         try {
             repo.save(entity);
+            log.debug("Saved shortUrl={} with ttl={}s", code, ttl);
         } catch (DuplicateKeyException e) {
-            // retry with a longer code if collision happens
+            log.error("Duplicate key for code={}, retrying with longer code", code);
             code = NanoIdUtils.randomNanoId(
                     NanoIdUtils.DEFAULT_NUMBER_GENERATOR,
                     NanoIdUtils.DEFAULT_ALPHABET,
@@ -69,6 +76,7 @@ public class UrlServiceImpl implements UrlService {
             );
             entity.setShortUrl(code);
             repo.save(entity);
+            log.debug("Retry succeeded with shortUrl={}", code);
         }
 
         cachePut(code, entity.getLongUrl(), ttl);
@@ -84,15 +92,21 @@ public class UrlServiceImpl implements UrlService {
      */
     @Override
     public Optional<String> resolve(String shortUrl) {
+        log.info("Resolving shortUrl={}", shortUrl);
+
+        // check cache first
         String cached = redis.opsForValue().get(cacheKey(shortUrl));
         if (cached != null) {
+            log.debug("Cache hit for shortUrl={}", shortUrl);
             incrementHitAsync(shortUrl);
             return Optional.of(cached);
         }
 
+        // fallback to DB lookup
         return repo.findByShortUrl(shortUrl)
                 .filter(m -> m.getExpiresAt() == null || m.getExpiresAt().isAfter(Instant.now()))
                 .map(m -> {
+                    log.debug("Cache miss, found in DB shortUrl={}", shortUrl);
                     long ttl = (m.getExpiresAt() != null)
                             ? Math.max(0, m.getExpiresAt().getEpochSecond() - Instant.now().getEpochSecond())
                             : 0;
@@ -112,8 +126,10 @@ public class UrlServiceImpl implements UrlService {
     private void cachePut(String shortUrl, String longUrl, long ttlSeconds) {
         if (ttlSeconds > 0) {
             redis.opsForValue().set(cacheKey(shortUrl), longUrl, java.time.Duration.ofSeconds(ttlSeconds));
+            log.debug("Cached shortUrl={} with ttl={}s", shortUrl, ttlSeconds);
         } else {
             redis.opsForValue().set(cacheKey(shortUrl), longUrl);
+            log.debug("Cached shortUrl={} with no ttl", shortUrl);
         }
     }
 
@@ -125,6 +141,7 @@ public class UrlServiceImpl implements UrlService {
         repo.findByShortUrl(shortUrl).ifPresent(m -> {
             m.setHitCount(m.getHitCount() + 1);
             repo.save(m);
+            log.debug("Incremented hit count for shortUrl={} (new count={})", shortUrl, m.getHitCount());
         });
     }
 }
