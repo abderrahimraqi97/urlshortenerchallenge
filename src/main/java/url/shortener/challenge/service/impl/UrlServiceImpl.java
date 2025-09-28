@@ -12,6 +12,7 @@ import url.shortener.challenge.entity.Url;
 import url.shortener.challenge.exception.AliasAlreadyExistsException;
 import url.shortener.challenge.exception.UrlNotFoundException;
 import url.shortener.challenge.repository.UrlRepository;
+import url.shortener.challenge.service.CodeGenerator;
 import url.shortener.challenge.service.UrlService;
 
 import java.time.Instant;
@@ -23,11 +24,15 @@ public class UrlServiceImpl implements UrlService {
     private final UrlRepository repo;
     private final AppProperties props;
     private final StringRedisTemplate redis;
+    private final CodeGenerator codeGenerator;
 
-    public UrlServiceImpl(UrlRepository repo, AppProperties props, StringRedisTemplate redis) {
+
+    public UrlServiceImpl(UrlRepository repo, AppProperties props, StringRedisTemplate redis,
+                          CodeGenerator codeGenerator) {
         this.repo = repo;
         this.props = props;
         this.redis = redis;
+        this.codeGenerator = codeGenerator;
     }
 
     /**
@@ -39,11 +44,7 @@ public class UrlServiceImpl implements UrlService {
     @Override
     public ShortUrlResponseDto create(LongUrlRequestDto req) {
         // generate NanoID with configurable length
-        String code = NanoIdUtils.randomNanoId(
-                NanoIdUtils.DEFAULT_NUMBER_GENERATOR,
-                NanoIdUtils.DEFAULT_ALPHABET,
-                props.getCodeLength()
-        );
+        String code = codeGenerator.generate(props.getCodeLength());
 
         if (repo.existsByShortUrl(code)) {
             throw new AliasAlreadyExistsException(code);
